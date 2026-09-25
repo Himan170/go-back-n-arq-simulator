@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Go-Back-N ARQ — Sliding Window Simulator</title>
+  <meta name="description" content="Interactive educational simulator for the Go-Back-N ARQ sliding window protocol." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+
+  <!-- HEADER -->
+  <header class="site-header">
+    <div class="header-inner">
+      <div class="header-title-group">
+        <h1>GO-BACK-N ARQ</h1>
+        <p class="header-subtitle">Sliding Window Protocol Simulator</p>
+      </div>
+      <p class="header-desc">
+        Visualize how Go-Back-N handles transmission, ACKs,<br>
+        packet loss, timeout and retransmission.
+      </p>
+    </div>
+  </header>
+
+  <!-- MAIN -->
+  <main id="app">
+
+    <!-- CONFIGURATION ROW -->
+    <section class="config-row" aria-label="Simulation configuration">
+
+      <div class="config-item">
+        <span class="config-label" id="lblWindow">Window Size</span>
+        <div class="stepper" role="group" aria-labelledby="lblWindow">
+          <button id="btnWinMinus" class="stepper-btn" aria-label="Decrease window size">&#8722;</button>
+          <span id="windowSizeDisplay" class="stepper-val" aria-live="polite">4</span>
+          <button id="btnWinPlus" class="stepper-btn" aria-label="Increase window size">+</button>
+        </div>
+      </div>
+
+      <div class="config-item">
+        <label class="config-label" for="totalFramesInput">Total Frames</label>
+        <input id="totalFramesInput" class="config-input" type="number" min="5" max="20" value="10" />
+      </div>
+
+      <div class="config-item">
+        <span class="config-label" id="lblMode">Error Mode</span>
+        <div class="radio-group" role="radiogroup" aria-labelledby="lblMode">
+          <label class="radio-label">
+            <input type="radio" name="errorMode" value="normal" checked id="modeNormal" />
+            <span class="radio-text">Normal</span>
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="errorMode" value="loss" id="modeLoss" />
+            <span class="radio-text">Demonstrate Loss</span>
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="errorMode" value="ackloss" id="modeAckLoss" />
+            <span class="radio-text">Lost ACK</span>
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="errorMode" value="corrupt" id="modeCorrupt" />
+            <span class="radio-text">Corruption</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="config-item">
+        <label class="config-label" for="speedSelect">Speed</label>
+        <select id="speedSelect" class="config-select">
+          <option value="2000">Slow</option>
+          <option value="1200" selected>Normal</option>
+          <option value="600">Fast</option>
+        </select>
+      </div>
+
+    </section>
+
+    <!-- GLOSSARY -->
+    <section class="glossary-row" aria-label="Protocol terminology reference">
+      <div class="glossary-group">
+        <div class="glossary-title">SENDER</div>
+        <div class="glossary-item"><span class="gterm">Sf</span><span class="gdef">Sequence number of the first
+            unacknowledged (outstanding) frame</span></div>
+        <div class="glossary-item"><span class="gterm">Sn</span><span class="gdef">Sequence number of the next frame
+            the sender will transmit</span></div>
+        <div class="glossary-item"><span class="gterm">Sw</span><span class="gdef">Max outstanding frames (window
+            size)</span></div>
+        <div class="glossary-item"><span class="gterm">READY / BLOCKING</span><span class="gdef">Sender FSM states —
+            BLOCKING when the window is full</span></div>
+      </div>
+      <div class="glossary-divider"></div>
+      <div class="glossary-group">
+        <div class="glossary-title">RECEIVER</div>
+        <div class="glossary-item"><span class="gterm">Rn</span><span class="gdef">Next sequence number receiver
+            expects</span>
+        </div>
+        <div class="glossary-item"><span class="gterm">ACK N</span><span class="gdef">Cumulative ACK; N is the next
+            sequence number expected</span></div>
+        <div class="glossary-item"><span class="gterm">Dup ACK</span><span class="gdef">Repeated ACK — out-of-order
+            frame discarded</span></div>
+      </div>
+      <div class="glossary-divider"></div>
+      <div class="glossary-group">
+        <div class="glossary-title">TIMER</div>
+        <div class="glossary-item"><span class="gterm">One timer</span><span class="gdef">Always tracks oldest
+            outstanding frame Sf</span></div>
+        <div class="glossary-item"><span class="gterm">Timeout</span><span class="gdef">Retransmit ALL frames from Sf to
+            Sn−1</span></div>
+      </div>
+    </section>
+
+    <!-- NETWORK VISUALIZATION -->
+    <section class="network-section" aria-label="Network visualization">
+
+      <!-- SENDER -->
+      <div class="node sender-node" id="senderNode">
+        <div class="node-label">SENDER <span class="sender-state state-ready" id="senderState">READY</span></div>
+        <div class="node-box" id="senderBox">
+          <div class="node-stat"><span class="stat-key">Sf</span> <span class="stat-val" id="infoSf">0</span></div>
+          <div class="node-stat"><span class="stat-key">Sn</span> <span class="stat-val" id="infoSn">0</span></div>
+          <div class="node-stat"><span class="stat-key">Sw</span> <span class="stat-val" id="infoSw">4</span></div>
+        </div>
+        <div class="sender-buffer-wrap">
+          <div class="buffer-label">STORED COPIES</div>
+          <div class="sender-buffer" id="senderBuffer" aria-label="Stored copies of outstanding frames"></div>
+        </div>
+        <div class="direction-labels">
+          <span class="dir-data">DATA &#8594;</span>
+          <span class="dir-ack">&#8592; ACK</span>
+        </div>
+      </div>
+
+      <!-- CHANNEL -->
+      <div class="channel-area" id="channelArea">
+        <div class="channel-line data-line"></div>
+        <div class="channel-line ack-line"></div>
+        <div class="channel-label top-label">DATA FRAMES &#8594;</div>
+        <div class="channel-label bot-label">&#8592; ACKs</div>
+        <div id="packetLayer" class="packet-layer"></div>
+      </div>
+
+      <!-- RECEIVER -->
+      <div class="node receiver-node" id="receiverNode">
+        <div class="node-label">RECEIVER</div>
+        <div class="node-box" id="receiverBox">
+          <div class="node-stat"><span class="stat-key">Rn</span> <span class="stat-val" id="infoRn">0</span></div>
+          <div class="node-stat"><span class="stat-key">Last ACK</span> <span class="stat-val" id="infoLastAck">0</span>
+          </div>
+        </div>
+        <div class="direction-labels">
+          <span class="dir-data">&nbsp;</span>
+          <span class="dir-ack">&nbsp;</span>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- TIMER BAR -->
+    <div class="timer-section" id="timerSection">
+      <div class="timer-label-row">
+        <span class="timer-label">TIMER — Seq <span id="timerFrameLabel">—</span></span>
+        <span class="timer-status" id="timerStatus"></span>
+      </div>
+      <div class="timer-track">
+        <div class="timer-fill" id="timerFill"></div>
+      </div>
+    </div>
+
+    <!-- SLIDING WINDOW -->
+    <section class="window-section" aria-label="Sliding window visualization">
+      <div class="window-section-label">SLIDING WINDOW</div>
+      <div class="window-scroll-wrapper">
+        <div class="window-track" id="windowTrack"></div>
+        <div class="window-bracket" id="windowBracket">
+          <div class="bracket-bar"></div>
+          <div class="bracket-label">WINDOW (W=<span id="bracketW">4</span>)</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CURRENT EVENT -->
+    <section class="event-section" aria-live="polite" aria-atomic="true">
+      <div class="event-header">CURRENT EVENT</div>
+      <div class="event-body" id="eventBody">
+        <span class="event-icon" id="eventIcon">&#11045;</span>
+        <div class="event-text">
+          <div class="event-title" id="eventTitle">Ready to simulate</div>
+          <div class="event-desc" id="eventDesc">Settings apply immediately. Press PLAY or STEP.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- STATISTICS -->
+    <div class="stats-row" aria-label="Simulation statistics">
+      <div class="stat-chip"><span class="stat-chip-key">DELIVERED</span><span class="stat-chip-val"
+          id="statDelivered">0</span></div>
+      <div class="stat-chip"><span class="stat-chip-key">ACKED</span> <span class="stat-chip-val"
+          id="statAcked">0</span></div>
+      <div class="stat-chip"><span class="stat-chip-key">RETX</span> <span class="stat-chip-val" id="statRetx">0</span>
+      </div>
+      <div class="stat-chip"><span class="stat-chip-key">TIMEOUTS</span> <span class="stat-chip-val"
+          id="statTimeouts">0</span></div>
+    </div>
+
+    <!-- PLAYBACK CONTROLS -->
+    <div class="controls-row" role="toolbar" aria-label="Playback controls">
+      <button id="btnStep" class="ctrl-btn" aria-label="Step forward one event">STEP &#8594;</button>
+      <button id="btnPlay" class="ctrl-btn primary" aria-label="Play simulation">&#9654; PLAY</button>
+      <button id="btnPause" class="ctrl-btn" aria-label="Pause simulation" disabled>&#9646;&#9646; PAUSE</button>
+      <button id="btnReset" class="ctrl-btn danger" aria-label="Reset simulation">&#8635; RESET</button>
+    </div>
+
+    <!-- COMPLETION OVERLAY -->
+    <div class="completion-overlay" id="completionOverlay" hidden>
+      <div class="completion-card">
+        <div class="completion-check">&#10003;</div>
+        <div class="completion-title">TRANSMISSION COMPLETE</div>
+        <div class="completion-stats" id="completionStats"></div>
+        <button id="btnRunAgain" class="ctrl-btn primary">&#8635; RUN AGAIN</button>
+      </div>
+    </div>
+
+  </main>
+
+  <footer class="site-footer">
+    <span>Keyboard: <kbd>Space</kbd> Play/Pause &nbsp;|&nbsp; <kbd>&#8594;</kbd> Step &nbsp;|&nbsp; <kbd>R</kbd>
+      Reset</span>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+
+</html>
