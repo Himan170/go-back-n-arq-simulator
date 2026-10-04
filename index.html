@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Go-Back-N ARQ — Interactive Simulator &amp; Lesson</title>
+  <meta name="description" content="Interactive Go-Back-N ARQ simulator with a guided lesson: watch the sliding window protocol run with packet loss or ACK loss, and see every step explained." />
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="learn.css" />
+</head>
+
+<body>
+  <!-- SITE HEADER -->
+  <header class="app-header">
+    <div class="wrap header-content">
+      <div class="brand">
+        <span class="brand-icon" aria-hidden="true">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 4.5-9 4.5-9-4.5L12 3Z"/><path d="m3 12 9 4.5 9-4.5"/><path d="m3 16.5 9 4.5 9-4.5"/></svg>
+        </span>
+        <div>
+          <h1 class="brand-title">Go-Back-N ARQ Simulator</h1>
+          <p class="brand-sub">Sliding window protocol · Interactive simulator &amp; guided lesson</p>
+        </div>
+      </div>
+      <span class="ready-pill"><i></i>Ready to learn</span>
+    </div>
+  </header>
+
+  <div class="wrap page">
+
+    <!-- SIMULATION CONFIGURATION -->
+    <section class="config-card" aria-label="Simulation configuration">
+      <div class="config-head">
+        <h2>Simulation configuration</h2>
+        <span class="config-note" id="maxWNote">Maximum W = 2ᵐ − 1 = 7</span>
+      </div>
+
+      <div class="config-grid">
+
+        <!-- Window Size -->
+        <div class="config-cell">
+          <label class="config-label" id="lblWin">Window size (W)</label>
+          <div class="stepper" role="group" aria-labelledby="lblWin">
+            <button id="btnWinMinus" class="step-btn" title="Decrease window size" aria-label="Decrease window size">&#8722;</button>
+            <span id="windowSizeDisplay" class="step-val">4</span>
+            <button id="btnWinPlus" class="step-btn" title="Increase window size" aria-label="Increase window size">+</button>
+          </div>
+          <p class="config-hint">Outstanding frame limit</p>
+        </div>
+
+        <!-- Total Frames -->
+        <div class="config-cell">
+          <label class="config-label" for="totalFramesInput">Total frames (N)</label>
+          <div class="stepper">
+            <button id="btnFramesMinus" class="step-btn" title="Decrease total frames" aria-label="Decrease frames">&#8722;</button>
+            <input id="totalFramesInput" class="config-num-input" type="number" min="5" max="20" value="9" />
+            <button id="btnFramesPlus" class="step-btn" title="Increase total frames" aria-label="Increase frames">+</button>
+          </div>
+          <p class="config-hint">5–20 frames</p>
+        </div>
+
+        <!-- Sequence Bits (m) -->
+        <div class="config-cell">
+          <label class="config-label" for="seqBitsSelect">Sequence bits (m)</label>
+          <select id="seqBitsSelect" class="config-select">
+            <option value="2">m = 2 · Seq 0–3</option>
+            <option value="3" selected>m = 3 · Seq 0–7</option>
+            <option value="4">m = 4 · Seq 0–15</option>
+          </select>
+          <p class="config-hint">2, 3 or 4 bits</p>
+        </div>
+
+        <!-- Error Mode -->
+        <div class="config-cell">
+          <label class="config-label" for="errorModeSelect">Error mode</label>
+          <select id="errorModeSelect" class="config-select">
+            <option value="normal" selected>Normal (No Faults)</option>
+            <option value="loss">Packet Loss</option>
+            <option value="ackloss">ACK Loss</option>
+          </select>
+          <p class="config-hint">Packet Loss · ACK Loss</p>
+        </div>
+
+        <!-- Fault Target -->
+        <div class="config-cell is-disabled" id="targetCell">
+          <label class="config-label" for="faultTargetSelect">Target packet / ACK</label>
+          <select id="faultTargetSelect" class="config-select">
+            <!-- Populated dynamically based on N -->
+          </select>
+          <p class="config-hint" id="targetHint">Available when a fault is selected</p>
+        </div>
+
+        <!-- Speed -->
+        <div class="config-cell">
+          <label class="config-label" for="speedSelect">Speed</label>
+          <select id="speedSelect" class="config-select">
+            <option value="2200">Slow (0.5×)</option>
+            <option value="1200" selected>Normal (1.0×)</option>
+            <option value="600">Fast (2.0×)</option>
+          </select>
+          <p class="config-hint">Slow (0.5×) · Fast (2.0×)</p>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- MAIN APP CONTAINER -->
+    <main id="app">
+
+      <!-- SIMULATION STAGE (LEFT COLUMN) -->
+      <section id="stage" aria-label="Simulation Network Stage">
+        <div id="in">
+
+          <!-- STAGE HEADER -->
+          <div class="stage-head">
+            <div>
+              <h2 class="stage-title">Protocol visualization</h2>
+              <p class="stage-sub">Sender → unreliable channel → receiver</p>
+            </div>
+            <span class="stage-status" id="stageStatus"><i></i><span id="stageStatusText">INITIAL STATE</span></span>
+          </div>
+
+          <!-- STATUS CARDS (Sf, Sn, Window, Rn, Timer) -->
+          <div id="chips" class="stat-row" aria-label="Protocol Status Registers"></div>
+
+          <!-- SENDER CARD -->
+          <section class="node-card sender-card" aria-label="Sender">
+            <div class="role-row">
+              <div class="role-left">
+                <span class="role-badge" id="sndRole">Sender</span>
+                <span class="fsm-badge state-ready" id="senderStateBadge">READY</span>
+              </div>
+              <!-- Integrated Timer Widget -->
+              <div id="tm" class="timer-widget">
+                <span class="timer-label">Timer (<span id="timerTarget">Sf</span>)</span>
+                <div class="timer-track" id="timerTrack">
+                  <div id="tb" class="timer-bar"></div>
+                </div>
+                <span class="timer-status-badge" id="timerStatusBadge">OFF</span>
+              </div>
+            </div>
+
+            <div class="strip-container sender-strip-wrap">
+              <div class="strip" id="sS" aria-label="Sender Packet Boxes"></div>
+              <!-- Window Bracket -->
+              <div id="win" class="win-bracket" aria-hidden="true">
+                <span class="win-label" id="winLabel">SEND WINDOW · W = 4</span>
+              </div>
+              <!-- Floating Sender Pointers -->
+              <div class="tag tag-sf" id="tSf">Sf ↓</div>
+              <div class="tag tag-sn" id="tSn">Sn ↓</div>
+            </div>
+          </section>
+
+          <!-- CENTRAL UNRELIABLE CHANNEL -->
+          <div id="chan" aria-label="Unreliable Network Channel">
+            <div class="chan-backdrop">
+              <div class="chan-grid-lines"></div>
+              <span class="chan-title">UNRELIABLE CHANNEL</span>
+
+              <div class="chan-deco deco-data">
+                <svg class="deco-arrow" width="28" height="128" viewBox="0 0 28 128" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2v122"/><path d="m3 113 11 11 11-11"/></svg>
+                <div class="deco-text"><b>DATA FRAMES</b><span>Sender → receiver</span></div>
+              </div>
+              <div class="chan-deco deco-ack">
+                <svg class="deco-arrow" width="28" height="128" viewBox="0 0 28 128" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 126V4"/><path d="m3 15 11-11 11 11"/></svg>
+                <div class="deco-text"><b>ACKS</b><span>Receiver → sender</span></div>
+              </div>
+
+              <span class="chan-status" id="chanStatus">Idle · No packets in transit</span>
+            </div>
+            <!-- In-flight packets and markers are rendered here -->
+            <div id="packetLayer" class="packet-layer"></div>
+          </div>
+
+          <!-- RECEIVER CARD -->
+          <section class="node-card receiver-card" aria-label="Receiver">
+            <div class="role-row">
+              <div class="role-left">
+                <span class="role-badge" id="rcvRole">Receiver</span>
+                <span class="rx-status-text">Window size 1 · No buffer</span>
+              </div>
+              <div class="role-right">
+                <span class="rx-stat">Expected <span id="rxExpectedVal">Seq 0</span></span>
+                <span class="rx-dot">·</span>
+                <span class="rx-stat">Last ACK <span id="rxLastAckVal">—</span></span>
+              </div>
+            </div>
+
+            <div class="strip-container receiver-strip-wrap">
+              <div class="strip" id="rS" aria-label="Receiver Packet Boxes"></div>
+              <!-- Floating Receiver Pointer -->
+              <div class="tag tag-rn" id="tRn">Rn ↓</div>
+            </div>
+          </section>
+
+          <!-- LEGEND -->
+          <div class="stage-legend" aria-label="Legend">
+            <span class="lg-title">LEGEND</span>
+            <span class="lg-item"><i class="lg-dot lg-data"></i>Data Frame</span>
+            <span class="lg-item"><i class="lg-dot lg-ack"></i>ACK (Cumulative)</span>
+            <span class="lg-item"><i class="lg-dot lg-retx"></i>Retransmission</span>
+            <span class="lg-item"><i class="lg-x">✕</i>Lost</span>
+          </div>
+
+          <p class="stage-foot">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M12 11v6"/><path d="M12 7.5h.01"/></svg>
+            ACK n means the receiver expects packet n next; it confirms all packets before n.
+          </p>
+
+        </div>
+      </section>
+
+      <!-- RIGHT-SIDE GUIDED LESSON PANEL -->
+      <aside id="panel" aria-label="Guided lesson">
+
+        <div class="lesson-head">
+          <span class="lesson-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4.5h6a4 4 0 0 1 4 4V21a3 3 0 0 0-3-3H2V4.5Z"/><path d="M22 4.5h-6a4 4 0 0 0-4 4V21a3 3 0 0 1 3-3h7V4.5Z"/></svg>
+            Guided lesson
+          </span>
+          <span class="event-step-badge" id="lStep">CONCEPT 1 / 12</span>
+        </div>
+
+        <div class="lesson-prog" id="lProg" aria-hidden="true"></div>
+
+        <div class="event-card">
+          <h2 id="lTtl" class="event-title"></h2>
+          <div id="lLead" class="event-lead"></div>
+        </div>
+
+        <div id="lCap" class="l-cap" aria-live="polite"></div>
+
+        <div class="theory-card">
+          <h3 class="theory-title">Why this happens</h3>
+          <div id="lExp" class="theory-content l-dim"></div>
+        </div>
+
+        <div class="l-nav">
+          <button id="lPrev" class="ctrl-btn" disabled>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+            Back
+          </button>
+          <button id="lGo" class="ctrl-btn primary" disabled>Continue <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></button>
+        </div>
+
+        <div class="l-list-head">
+          <span>CONCEPTS</span>
+          <span id="lMode">Normal run</span>
+        </div>
+        <ol id="lList" class="l-list" aria-label="Concepts"></ol>
+
+      </aside>
+
+    </main>
+  </div>
+
+  <script src="script.js"></script>
+  <script src="learn.js"></script>
+</body>
+
+</html>
