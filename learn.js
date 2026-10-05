@@ -49,7 +49,7 @@
   const ICON_RESTART = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>';
   const ICON_CHEV = '<svg class="l-chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>';
   const pad2 = n => String(n).padStart(2, '0');
-  const MODE_NAME = { normal: 'Normal run', loss: 'Packet loss run', ackloss: 'ACK loss run' };
+  const MODE_NAME = { normal: 'Normal run', loss: 'Packet loss run', ackloss: 'ACK loss run', framedelay: 'Frame delay run', ackdelay: 'ACK delay run' };
 
   const speedFactor = () => (fast ? FAST_ANIM : (sim.stepMs || 1200) / 1200);
   const ms = x => Math.max(1, x * speedFactor());
@@ -135,7 +135,12 @@
       timeout: find(e => e.type === 'TIMEOUT'),
       dup:     find(e => e.type === 'ARRIVE' && e.reason === 'duplicate'),
       done:    find(e => e.type === 'COMPLETE'),
+      fDelay:  find(e => e.type === 'SEND' && e.delayed),                 // a frame is held back in the channel
+      aDelay:  find(e => e.type === 'ARRIVE' && e.ackDelayed),            // the receiver sends an ACK that will be slow
+      lateF:   find(e => e.type === 'ARRIVE' && e.late),                  // the delayed frame finally arrives
+      lateA:   find(e => e.type === 'ACK_ARRIVE' && e.late),              // the delayed ACK finally arrives
     };
+    const delayMode = mode === 'framedelay' || mode === 'ackdelay';
     ix.retx      = ix.timeout >= 0 ? find(e => e.type === 'SEND' && e.retx, ix.timeout) : -1;
     ix.slideSend = ix.slide >= 0 ? find(e => e.type === 'SEND', ix.slide + 1) : -1;
 
@@ -272,10 +277,68 @@
       const oe = ev[ix.ooo];
       add(11, ix.ooo, {
         t: 'Out-of-order packets',
-        lead: 'Packets after a lost one still arrive, but too early.',
+        lead: mode === 'framedelay' ? 'Packets after the delayed one arrive first — too early.' : 'Packets after a lost one still arrive, but too early.',
         exp: () => `The receiver expects <b>${lbl(oe.snap.Rn)}</b>. A packet that does not match Rn is <b>discarded</b> — the receiver has no buffer for out-of-order data — and it replies with <b>ACK ${oe.snap.Rn % M}</b> again. These repeated ACKs do not move Sf.`,
         cap: e => `Packet ${lbl(e.seq)} arrives: expected ${lbl(e.snap.Rn)} → discarded, the receiver repeats ACK ${e.snap.Rn % M}.`,
         after: () => pulse(D.tRn, 1.5, 600)
+      });
+    }
+
+    /* ── frame delay ── */
+    if (ix.fDelay >= 0) {
+      const fe = ev[ix.fDelay];
+      add(10, ix.fDelay, {
+        t: 'Delayed frame',
+        lead: 'The frame is not lost — it is just very slow.',
+        exp: () => `Frame ${lbl(fe.seq)} is sent, but this time the channel holds it back. It is <b>still travelling</b>, yet the sender cannot tell a slow frame from a lost one: it only sees that no ACK comes back while its timer keeps running.`,
+        cap: e => `Frame ${lbl(e.seq)} is sent but DELAYED — it is still travelling (dashed outline).`,
+        after: e => glow(sB[e.seq], '#f1bc66', 900)
+      });
+    }
+
+    if (ix.lateF >= 0) {
+      const le = ev[ix.lateF];
+      add(12, ix.lateF, {
+        t: 'The late frame arrives',
+        lead: 'Too late — the sender has already given up on it.',
+        exp: () => (le.accepted
+          ? `The original Frame ${lbl(le.seq)} finally reaches the receiver. It equals <b>Rn</b>, so it is accepted and Rn moves to ${lbl(le.RnAfter)}. `
+          : `The original Frame ${lbl(le.seq)} finally reaches the receiver, but it is not the packet Rn expects, so it is discarded. `) +
+          'The sender had already timed out and sent another copy, so that retransmission was <b>unnecessary</b>: the frame was never lost. A longer timeout would have avoided the extra traffic.',
+        cap: e => e.accepted
+          ? `The delayed Frame ${lbl(e.seq)} finally arrives and is accepted — but the sender already resent it.`
+          : `The delayed Frame ${lbl(e.seq)} finally arrives, but the receiver expects ${lbl(e.snap.Rn)} — discarded.`,
+        after: () => pulse(D.tRn, 1.5, 600)
+      });
+    }
+
+    /* ── ACK delay ── */
+    if (ix.aDelay >= 0) {
+      const de = ev[ix.aDelay];
+      add(10, ix.aDelay, {
+        t: 'Delayed ACK',
+        lead: 'The ACK is not lost — it is just very slow.',
+        exp: () => `The receiver accepted Frame ${lbl(de.seq)} and answered with <b>ACK ${de.ackNum}</b>, but that ACK is <b>still travelling</b> toward the sender, who cannot tell it from a lost ACK. ` +
+          (ix.rescue >= 0
+            ? 'A later ACK may reach the sender first and cover it — watch for that.'
+            : 'No later ACK will cover it, so the sender may time out before it arrives.'),
+        cap: e => `Frame ${lbl(e.seq)} is accepted. ACK ${e.ackNum} is sent back but DELAYED — it is still travelling (dashed outline).`,
+        after: () => pulse(D.tRn, 1.5, 600)
+      });
+    }
+
+    if (ix.lateA >= 0) {
+      const ae = ev[ix.lateA];
+      add(12, ix.lateA, {
+        t: 'The late ACK arrives',
+        lead: ae.slide ? 'Too late — the sender already timed out.' : 'Too late to matter — it is no longer needed.',
+        exp: () => ae.slide
+          ? `ACK ${ae.ackNum} finally reaches the sender and moves Sf to ${lbl(ae.snap.Sf)}. But the sender had already timed out and sent packets again, so those retransmissions were <b>unnecessary</b>: the data had arrived all along, only its ACK was slow.`
+          : `ACK ${ae.ackNum} finally reaches the sender, but Sf is already beyond it — a later cumulative ACK covered it long ago. A stale ACK is simply ignored; the slow ACK cost nothing.`,
+        cap: e => e.slide
+          ? `The delayed ACK ${e.ackNum} finally arrives: Sf moves to ${lbl(e.snap.Sf)} — after the timeout.`
+          : `The delayed ACK ${e.ackNum} finally arrives — Sf is already past it, so it is ignored.`,
+        after: () => pulse(D.tSf, 1.4, 600)
       });
     }
 
@@ -300,9 +363,9 @@
       const re = ev[ix.rescue];
       add(11, ix.rescue, {
         t: 'A later ACK covers it',
-        lead: 'Cumulative ACKs make a lost ACK harmless.',
-        exp: () => `ACK ${re.ackNum} confirms everything before ${lbl(re.snap.Sf)}, including the packet whose own ACK was lost. Sf jumps forward by ${re.SfAfter - re.SfBefore} at once and the timer restarts. No timeout and no retransmission were needed.`,
-        cap: e => `ACK ${e.ackNum} arrives and covers the lost ACK: Sf jumps to ${lbl(e.snap.Sf)}.`,
+        lead: mode === 'ackdelay' ? 'Cumulative ACKs make a slow ACK harmless.' : 'Cumulative ACKs make a lost ACK harmless.',
+        exp: () => `ACK ${re.ackNum} confirms everything before ${lbl(re.snap.Sf)}, including the packet whose own ACK ${mode === 'ackdelay' ? 'is still travelling' : 'was lost'}. Sf jumps forward by ${re.SfAfter - re.SfBefore} at once and the timer restarts. No timeout and no retransmission were needed.`,
+        cap: e => `ACK ${e.ackNum} arrives and covers the ${mode === 'ackdelay' ? 'delayed' : 'lost'} ACK: Sf jumps to ${lbl(e.snap.Sf)}.`,
         after: () => pulse(D.tSf, 1.4, 600)
       });
     }
@@ -314,7 +377,11 @@
         lead: 'Sf is stuck — the timer keeps counting down.',
         exp: () => (mode === 'loss'
           ? `Packet ${lbl(toEv.Sf)} was lost. ` + (ix.ooo >= 0 ? `The receiver keeps replying with <b>ACK ${ev[ix.ooo].snap.Rn % M}</b> (its Rn never moves), but those ACKs do not advance Sf. ` : 'No ACK can advance Sf. ')
-          : `The ACK that would have confirmed packet ${lbl(toEv.Sf)} was lost and no later ACK arrives to cover it. `) +
+          : mode === 'framedelay'
+            ? `Frame ${lbl(toEv.Sf)} is still travelling, so nothing can confirm it and Sf cannot move. ` + (ix.ooo >= 0 ? `Later frames that arrive early are discarded and only trigger repeated <b>ACK ${ev[ix.ooo].snap.Rn % M}</b>s. ` : '')
+            : mode === 'ackdelay'
+              ? `The ACK for packet ${lbl(toEv.Sf)} is still travelling and no later ACK arrives to cover it. `
+              : `The ACK that would have confirmed packet ${lbl(toEv.Sf)} was lost and no later ACK arrives to cover it. `) +
           'The timer is never restarted, so it keeps counting toward zero.',
         cap: () => `Sf = ${lbl(toEv.Sf)} is stuck — no ACK can advance it. The timer keeps counting down …`,
         after: () => pulse(D.tm, 1.15, 600)
@@ -336,7 +403,11 @@
         exp: () => `Packets ${lblList(resent)} are sent again in order (amber). ` +
           (mode === 'loss'
             ? 'This time they arrive in sequence, Rn advances, and the ACKs slide the window forward. '
-            : 'The receiver already has some of them — only an ACK was lost — so it discards those duplicates and answers with its current ACK, letting the sender finally move on. ') +
+            : mode === 'framedelay'
+              ? 'But the first of them was never lost — the original is still on its way — so some of these copies are <b>unnecessary</b>. '
+              : mode === 'ackdelay'
+                ? 'But the receiver already has them — only an ACK was slow — so these copies are <b>unnecessary</b>. '
+                : 'The receiver already has some of them — only an ACK was lost — so it discards those duplicates and answers with its current ACK, letting the sender finally move on. ') +
           'That is <b>Go-Back-N</b>.',
         cap: e => `Going back to Sf = ${lbl(toEv.Sf)}: packet ${lbl(e.seq)} is sent again.`,
         after: () => pulse(D.win, 1.03, 600)
@@ -347,7 +418,11 @@
       add(15, ix.dup, {
         t: 'Duplicate packets',
         lead: 'Resent packets the receiver already has.',
-        exp: 'This packet had already been delivered — only its ACK was lost. The receiver sees a number below Rn, <b>discards the duplicate</b>, and answers with its current ACK so the sender can move on.',
+        exp: mode === 'framedelay'
+          ? 'The delayed original was already delivered when it finally arrived, so this retransmitted copy is a duplicate. The receiver sees a number below Rn, <b>discards it</b>, and answers with its current ACK.'
+          : mode === 'ackdelay'
+            ? 'This packet had already been delivered — only its ACK was slow. The receiver sees a number below Rn, <b>discards the duplicate</b>, and answers with its current ACK.'
+            : 'This packet had already been delivered — only its ACK was lost. The receiver sees a number below Rn, <b>discards the duplicate</b>, and answers with its current ACK so the sender can move on.',
         cap: e => `Packet ${lbl(e.seq)} arrives again: already delivered, so it is discarded and the receiver repeats ACK ${e.snap.Rn % M}.`,
         after: () => pulse(D.tRn, 1.5, 600)
       });
@@ -360,7 +435,8 @@
         t: 'You now know Go-Back-N',
         lead: 'Recap of the whole protocol.',
         exp: () => '<b>Sequence numbers</b> label packets · <b>Sf/Sn/Ssize</b> bound the window · <b>Rn</b> accepts only in-order data · <b>ACK n</b> is cumulative · <b>one timer</b> guards Sf · on timeout <b>all outstanding packets are resent</b>.' +
-          `<br><br>This run: ${plural(st.retx, 'retransmission')}, ${plural(st.timeouts, 'timeout')}.`,
+          `<br><br>This run: ${plural(st.retx, 'retransmission')}, ${plural(st.timeouts, 'timeout')}.` +
+          (delayMode ? '<br><br>A <b>delay is not a loss</b>: if the timeout is shorter than the delay, Go-Back-N resends packets that were never lost. A later cumulative ACK, or a longer timeout, avoids that waste.' : ''),
         cap: () => `All ${N} packets delivered, in order.`,
         after: () => Promise.all(rB.map((b, k) => pulse(b, 1.25, 500, k * 100)))
       });
@@ -373,10 +449,13 @@
   // One short line describing what the simulator just did (shown while it plays between concepts)
   function eventCaption(ev) {
     switch (ev.type) {
-      case 'SEND':       return ev.retx ? `Retransmit Frame ${ev.seq} (Seq ${ev.wireSeq})` : `Send Frame ${ev.seq} (Seq ${ev.wireSeq})`;
-      case 'ARRIVE':     return ev.accepted ? `Frame ${ev.seq} accepted — Rn advances` : `Frame ${ev.seq} discarded (${ev.reason})`;
+      case 'SEND':       return ev.retx ? `Retransmit Frame ${ev.seq} (Seq ${ev.wireSeq})`
+                                : ev.delayed ? `Send Frame ${ev.seq} (Seq ${ev.wireSeq}) — the channel delays it`
+                                : `Send Frame ${ev.seq} (Seq ${ev.wireSeq})`;
+      case 'ARRIVE':     return (ev.late ? 'Delayed ' : '') + (ev.accepted ? `Frame ${ev.seq} accepted — Rn advances` : `Frame ${ev.seq} discarded (${ev.reason})`) +
+                                (ev.ackDelayed ? ' — its ACK will be delayed' : '');
       case 'LOST':       return `Frame ${ev.seq} lost in the channel`;
-      case 'ACK_ARRIVE': return ev.slide ? `ACK ${ev.ackNum} arrives — the window slides` : `ACK ${ev.ackNum} arrives — a repeat, ignored`;
+      case 'ACK_ARRIVE': return (ev.late ? 'Delayed ' : '') + (ev.slide ? `ACK ${ev.ackNum} arrives — the window slides` : `ACK ${ev.ackNum} arrives — a repeat, ignored`);
       case 'ACK_LOST':   return `ACK ${ev.ackNum} lost in the channel`;
       case 'TIMEOUT':    return `Timeout — go back to Sf = ${lbl(ev.Sf)}`;
       case 'COMPLETE':   return 'All frames delivered';

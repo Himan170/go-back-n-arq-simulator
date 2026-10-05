@@ -10,6 +10,11 @@
    ================================================================ */
 const NET = { TX: 1, D: 3, A: 3, TIMEOUT: 10 };
 
+/* Delay faults. A delayed packet normally takes a few units to cross; a delayed one is held back long enough
+   for the sender's timer to beat it. If a timeout happens while it is still travelling, its arrival is retimed
+   to land HOLD units after the timeout (so the late original and the retransmitted copy never overlap). */
+const DELAY = { FRAME_FALLBACK: 40, ACK_FALLBACK: 18, HOLD_FRAME: 1.5, HOLD_ACK: 2 };
+
 const sim = {
   // Configurable Parameters
   mBits:        3,          // Sequence bits (m) -> 2, 3, 4
@@ -17,7 +22,7 @@ const sim = {
   maxSw:        7,          // 2^m - 1
   windowSize:   4,          // Sw
   totalFrames:  9,          // N (dynamic single source of truth!)
-  mode:         'normal',   // 'normal' | 'loss' | 'ackloss'
+  mode:         'normal',   // 'normal' | 'loss' | 'ackloss' | 'framedelay' | 'ackdelay'
   targetFrame:  1,          // Which frame or ACK is affected
   stepMs:       1200,       // Real ms per unit for playback speed
 
@@ -72,7 +77,14 @@ function buildTimeline(cfg) {
     dataFault.set(`${targetFrame}#1`, 'lost');
   } else if (mode === 'ackloss') {
     ackFault.set(targetFrame, 'lost');
+  } else if (mode === 'framedelay') {
+    dataFault.set(`${targetFrame}#1`, 'delay');
+  } else if (mode === 'ackdelay') {
+    ackFault.set(targetFrame, 'delay');
   }
+  const isDelay = mode === 'framedelay' || mode === 'ackdelay';
+  const delayedWaiting = [];   // delayed packets (their queue entry is retimed when a timeout happens first)
+  let allAcked = false;        // delay modes: the sender has everything, the channel still drains
 
   // Protocol state registers (absolute indices for array indexing)
   let sfAbs = 0, snAbs = 0, rnAbs = 0, lastAck = -1;
@@ -93,7 +105,7 @@ function buildTimeline(cfg) {
   const q = [];
   let order = 0;
   const PRI = { ARRIVE: 0, LOST: 0, ACK_LOST: 1, ACK_ARRIVE: 1, TIMEOUT: 2, PUMP: 3 };
-  const schedule = (t, kind, data) => q.push({ t, kind, pri: PRI[kind], n: order++, data });
+  const schedule = (t, kind, data) => { const e = { t, kind, pri: PRI[kind], n: order++, data }; q.push(e); return e; };
   const popNext = () => {
     let bi = 0;
     for (let i = 1; i < q.length; i++) {
@@ -143,6 +155,7 @@ function buildTimeline(cfg) {
     const fault = dataFault.get(`${frameId}#${attempt}`);
     if (fault) dataFault.delete(`${frameId}#${attempt}`);
     const lost    = fault === 'lost';
+    const delayed = fault === 'delay';
 
     snAbs++;
     states[frameId] = retx ? 'retx' : 'sent';
@@ -155,16 +168,17 @@ function buildTimeline(cfg) {
     }
 
     const pkt = {
-      kind: 'data', seq: frameId, wireSeq: seq, retx, lost, discarded: false,
-      t0: t, t1: lost ? t + D / 2 : t + D, frac: lost ? 0.5 : 1,
+      kind: 'data', seq: frameId, wireSeq: seq, retx, lost, delayed, discarded: false,
+      t0: t, t1: lost ? t + D / 2 : delayed ? t + DELAY.FRAME_FALLBACK : t + D, frac: lost ? 0.5 : 1,
       startEv: events.length, endEv: Infinity, el: null, markerEl: null,
     };
     packets.push(pkt);
 
     const arrivalKind = lost ? 'LOST' : 'ARRIVE';
-    schedule(pkt.t1, arrivalKind, { seq: frameId, wireSeq: seq, pkt, retx });
+    const entry = schedule(pkt.t1, arrivalKind, { seq: frameId, wireSeq: seq, pkt, retx });
+    if (delayed) { pkt.entry = entry; delayedWaiting.push(pkt); }
 
-    emit('SEND', t, { seq: frameId, wireSeq: seq, retx, attempt, timerStarted });
+    emit('SEND', t, { seq: frameId, wireSeq: seq, retx, attempt, timerStarted, delayed });
     txFree = t + TX;
   }
 
@@ -222,21 +236,24 @@ function buildTimeline(cfg) {
         const ackFaultKind = accepted ? ackFault.get(frameId) : undefined;
         if (ackFaultKind) ackFault.delete(frameId);
         const ackLost    = ackFaultKind === 'lost';
-            if (ackLost) lostAckNums.add(RnAfterAbs);
+        const ackDelayed = ackFaultKind === 'delay';
+        if (ackLost || ackDelayed) lostAckNums.add(RnAfterAbs);   // numbers the sender will not hear in time
 
         const ack = {
           kind: 'ack', ackNum: RnAfterMod, confirmedSeq: frameId, dup: !accepted,
-          lost: ackLost,
-          t0: t, t1: ackLost ? t + A / 2 : t + A, frac: ackLost ? 0.5 : 1,
+          lost: ackLost, delayed: ackDelayed,
+          t0: t, t1: ackLost ? t + A / 2 : ackDelayed ? t + DELAY.ACK_FALLBACK : t + A, frac: ackLost ? 0.5 : 1,
           startEv: events.length, endEv: Infinity, el: null, markerEl: null,
         };
         packets.push(ack);
 
         const ackKind = ackLost ? 'ACK_LOST' : 'ACK_ARRIVE';
-        schedule(ack.t1, ackKind, { ackNum: RnAfterMod, confirmedSeq: frameId, pkt: ack });
+        const ackEntry = schedule(ack.t1, ackKind, { ackNum: RnAfterMod, confirmedSeq: frameId, pkt: ack });
+        if (ackDelayed) { ack.entry = ackEntry; delayedWaiting.push(ack); }
 
         emit('ARRIVE', t, {
           seq: frameId, wireSeq, accepted, reason, retx,
+          late: !!pkt.delayed, ackDelayed,
           RnBefore: RnBeforeAbs, RnAfter: RnAfterAbs, ackNum: RnAfterMod,
         });
         break;
@@ -284,12 +301,17 @@ function buildTimeline(cfg) {
           ackNum, slide, SfBefore, SfAfter: sfAbs, timerAction,
           isDupAck: pkt.dup, coveredLostAck,
           wasBlocking, nowBlocking,
+          late: !!pkt.delayed, afterTimeout: !!pkt.retimed,
         });
 
         if (slide) requestPump(t);
         if (sfAbs >= N) {
-          emit('COMPLETE', t, {});
-          done = true;
+          if (isDelay) {
+            allAcked = true;          // let slow packets finish crossing before the run is declared complete
+          } else {
+            emit('COMPLETE', t, {});
+            done = true;
+          }
         }
         break;
       }
@@ -305,9 +327,23 @@ function buildTimeline(cfg) {
         startTimer(t, sfAbs);
         emit('TIMEOUT', t, { Sf: sfAbs, SnOld, seqs });
         retransmitting = false;
+
+        // a delayed packet that is still travelling will now arrive just after this timeout
+        for (const dp of delayedWaiting) {
+          if (dp.retimed || !q.includes(dp.entry)) continue;
+          if (dp.kind === 'data' && !(dp.seq >= sfAbs && dp.seq < SnOld)) continue;
+          dp.retimed = true;
+          dp.entry.t = t + (dp.kind === 'data' ? DELAY.HOLD_FRAME : DELAY.HOLD_ACK);
+          dp.t1 = dp.entry.t;
+        }
         requestPump(t);
         break;
       }
+    }
+
+    if (allAcked && !done && !q.some(e => e.kind !== 'PUMP' && e.kind !== 'TIMEOUT')) {
+      emit('COMPLETE', t, {});
+      done = true;
     }
   }
 
@@ -342,7 +378,7 @@ function populateDomRefs() {
     rxExpectedVal: $('rxExpectedVal'), rxLastAckVal: $('rxLastAckVal'),
     chips: $('chips'),
     chanStatus: $('chanStatus'), stageStatus: $('stageStatus'), stageStatusText: $('stageStatusText'),
-    maxWNote: $('maxWNote'), targetHint: $('targetHint'),
+    maxWNote: $('maxWNote'), targetHint: $('targetHint'), modeHint: $('modeHint'),
   };
 }
 
@@ -389,9 +425,18 @@ function readConfigFromUI() {
   const noFault = sim.mode === 'normal';
   D.targetCell.classList.toggle('is-disabled', noFault);
   D.faultTargetSelect.disabled = noFault;
-  D.targetHint.textContent = noFault
-    ? 'Available when a fault is selected'
-    : (sim.mode === 'ackloss' ? 'The ACK that will be lost' : 'The packet that will be lost');
+  const MODE_INFO = {
+    normal:     { hint: 'Loss or delay · frames or ACKs',  target: 'Available when a fault is selected' },
+    loss:       { hint: 'A frame is destroyed in the channel',    target: 'The packet that will be lost' },
+    ackloss:    { hint: 'An ACK is destroyed in the channel',     target: 'The ACK that will be lost' },
+    framedelay: { hint: "Frame is still travelling. It may arrive after the sender's timeout, causing unnecessary retransmission.",
+                  target: 'The frame that will be delayed' },
+    ackdelay:   { hint: 'ACK is still travelling toward the sender. The sender may timeout before receiving it.',
+                  target: 'The frame whose ACK will be delayed' },
+  };
+  const info = MODE_INFO[sim.mode] || MODE_INFO.normal;
+  D.modeHint.textContent = info.hint;
+  D.targetHint.textContent = info.target;
   D.maxWNote.textContent = `Maximum W = 2ᵐ − 1 = ${sim.maxSw}`;
 }
 
@@ -631,8 +676,9 @@ function updateDisplay() {
   const snCol = col(V.Sn, sWrap);
   const rnCol = col(V.Rn, rWrap);
 
-  const same = V.Sf === V.Sn;                       // one combined "Sf, Sn" label when they coincide
-  D.tSf.textContent = same ? 'Sf, Sn ↓' : 'Sf ↓';
+  const sameCol = Math.min(V.Sf, N - 1) === Math.min(V.Sn, N - 1);   // would be drawn on the same box
+  const same = sameCol;                             // one label instead of two stacked ones
+  D.tSf.textContent = V.Sf === V.Sn ? 'Sf, Sn ↓' : 'Sf ↓';
   D.tSf.style.left  = sfCol + 'px';
   D.tSn.style.left  = snCol + 'px';
   D.tSn.style.opacity = same ? '0' : '1';
@@ -651,6 +697,13 @@ function updateDisplay() {
   D.win.style.top     = (boxH + 12) + 'px';
   D.win.style.opacity = V.Sf >= N ? '0' : '1';
   D.winLabel.textContent = `SEND WINDOW · W = ${Sw}`;
+  {
+    const lw = D.winLabel.offsetWidth, ww = bracketRight - bracketLeft;
+    const want = (ww - lw) / 2;                                   // centred under the bracket…
+    const minL = -bracketLeft, maxL = sWrap.width - bracketLeft - lw;   // …but never outside the strip
+    D.winLabel.style.transform = 'none';
+    D.winLabel.style.left = Math.max(minL, Math.min(maxL, want)) + 'px';
+  }
 
   // 6. Receiver Stats
   D.rxExpectedVal.textContent = `Seq ${seqOf(V.Rn)}`;
@@ -679,6 +732,8 @@ function updateDisplay() {
   let label = 'INITIAL STATE', cls = '';
   if (ev) {
     if (ev.type === 'COMPLETE')                          { label = 'COMPLETE';  cls = 'is-done'; }
+    else if (ev.type === 'SEND' && ev.delayed)           { label = 'FRAME DELAYED'; cls = 'is-warn'; }
+    else if (ev.type === 'ARRIVE' && ev.ackDelayed)      { label = 'ACK DELAYED';   cls = 'is-warn'; }
     else if (ev.type === 'TIMEOUT')                      { label = 'TIMEOUT';   cls = 'is-warn'; }
     else if (ev.type === 'LOST' || ev.type === 'ACK_LOST') { label = ev.type === 'LOST' ? 'PACKET LOST' : 'ACK LOST'; cls = 'is-warn'; }
     else                                                 { label = 'IN PROGRESS'; cls = 'is-run'; }
@@ -691,14 +746,16 @@ function updateDisplay() {
 function makePacketEl(p) {
   const el = document.createElement('div');
   if (p.kind === 'data') {
-    el.className = `pkt data${p.retx ? ' retx' : ''}`;
+    el.className = `pkt data${p.retx ? ' retx' : ''}${p.delayed ? ' delayed' : ''}`;
     el.innerHTML = `<span>${p.wireSeq}</span>` +
-      (p.retx ? '<span class="pkt-sub">↻RETX</span>' : '<span class="pkt-sub">DATA</span>');
+      (p.delayed ? '<span class="pkt-sub">DELAYED</span>'
+        : p.retx ? '<span class="pkt-sub">↻RETX</span>' : '<span class="pkt-sub">DATA</span>');
     el.title = `Frame ID ${p.seq} (Seq ${p.wireSeq})`;
   } else {
-    el.className = `pkt ack${p.dup ? ' dup-ack' : ''}`;
+    el.className = `pkt ack${p.dup ? ' dup-ack' : ''}${p.delayed ? ' delayed' : ''}`;
     el.innerHTML = `<span>ACK ${p.ackNum}</span>` +
-      (p.dup ? '<span class="pkt-sub">DUP</span>' : '<span class="pkt-sub">CUMULATIVE</span>');
+      (p.delayed ? '<span class="pkt-sub">DELAYED</span>'
+        : p.dup ? '<span class="pkt-sub">DUP</span>' : '<span class="pkt-sub">CUMULATIVE</span>');
     el.title = `Cumulative ACK for Seq ${p.ackNum}`;
   }
   D.packetLayer.appendChild(el);

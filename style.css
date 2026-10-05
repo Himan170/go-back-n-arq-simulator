@@ -634,8 +634,7 @@ html, body {
 .win-label {
   position: absolute;
   top: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
+  left: 0;                      /* positioned from script.js so it never leaves the card */
   font-family: var(--font-mono);
   font-size: 12px;
   letter-spacing: 0.03em;
@@ -780,6 +779,18 @@ html, body {
 
 .pkt.ack.dup-ack { background: #3bb894; }
 
+/* delayed packets: dashed outline + slow pulse, so the "still travelling" packet is easy to spot */
+.pkt.delayed {
+  outline: 1.5px dashed rgba(255, 255, 255, 0.85);
+  outline-offset: 2px;
+  animation: delay-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes delay-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.6; }
+}
+
 .pkt.bad {
   background: var(--c-lost) !important;
   color: #1a0b10 !important;
@@ -864,6 +875,7 @@ html, body {
 .lg-data { background: var(--c-data); }
 .lg-ack  { background: var(--c-ack); }
 .lg-retx { background: var(--c-retx); }
+.lg-delay { background: transparent; border: 1.5px dashed var(--s-muted); }
 
 .lg-x {
   font-style: normal;

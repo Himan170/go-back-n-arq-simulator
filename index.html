@@ -78,8 +78,10 @@
             <option value="normal" selected>Normal (No Faults)</option>
             <option value="loss">Packet Loss</option>
             <option value="ackloss">ACK Loss</option>
+            <option value="framedelay">Frame Delay</option>
+            <option value="ackdelay">ACK Delay</option>
           </select>
-          <p class="config-hint">Packet Loss · ACK Loss</p>
+          <p class="config-hint" id="modeHint">Loss or delay · frames or ACKs</p>
         </div>
 
         <!-- Fault Target -->
@@ -202,6 +204,7 @@
             <span class="lg-item"><i class="lg-dot lg-ack"></i>ACK (Cumulative)</span>
             <span class="lg-item"><i class="lg-dot lg-retx"></i>Retransmission</span>
             <span class="lg-item"><i class="lg-x">✕</i>Lost</span>
+            <span class="lg-item"><i class="lg-dot lg-delay"></i>Delayed</span>
           </div>
 
           <p class="stage-foot">
