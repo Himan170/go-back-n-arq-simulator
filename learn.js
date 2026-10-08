@@ -35,6 +35,7 @@
   let concepts = [], cur = 0, done = [];
   let internal = false, fast = false;
   let epoch = 0;
+  let auto = false, autoTimer = null, ready = false;   // autoplay: on/off, pending timer, current concept fully shown
   let waiter = null;                    // { at, resolve, reject } while the simulator is playing towards a concept
 
   /* ================================================================
@@ -47,6 +48,8 @@
 
   const ICON_NEXT = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
   const ICON_RESTART = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>';
+  const ICON_PLAY = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4.5v15a1 1 0 0 0 1.5.86l12-7.5a1 1 0 0 0 0-1.72l-12-7.5A1 1 0 0 0 7 4.5Z"/></svg>';
+  const ICON_PAUSE = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="4" width="4.5" height="16" rx="1.2"/><rect x="13.5" y="4" width="4.5" height="16" rx="1.2"/></svg>';
   const ICON_CHEV = '<svg class="l-chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>';
   const pad2 = n => String(n).padStart(2, '0');
   const MODE_NAME = { normal: 'Normal run', loss: 'Packet loss run', ackloss: 'ACK loss run', framedelay: 'Frame delay run', ackdelay: 'ACK delay run', framecorrupt: 'Frame corruption run', ackcorrupt: 'ACK corruption run' };
@@ -539,6 +542,49 @@
   /* ================================================================
      LESSON FLOW
      ================================================================ */
+  /* ================================================================
+     AUTOPLAY — Play button advances through the concepts by itself
+     ================================================================ */
+  function clearAuto() { if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; } }
+
+  function renderPlay() {
+    const b = $('lPlay');
+    b.innerHTML = auto ? `${ICON_PAUSE} Pause` : `${ICON_PLAY} Play`;
+    b.classList.toggle('is-playing', auto);
+    b.setAttribute('aria-pressed', auto ? 'true' : 'false');
+    b.title = auto ? 'Pause the automatic lesson' : 'Play the whole lesson automatically';
+  }
+
+  // Give the learner time to read the explanation before moving on (longer text, slower speed => longer pause).
+  function readDelay() {
+    const len = ($('lExp').textContent || '').length + ($('lLead').textContent || '').length;
+    return Math.min(14000, Math.max(4500, 2500 + len * 30)) * Math.max(0.6, speedFactor());
+  }
+
+  function scheduleAuto() {
+    clearAuto();
+    if (!auto || !ready) return;
+    if (cur >= concepts.length - 1) { setAuto(false); return; }   // finished: stop on the last concept
+    autoTimer = setTimeout(() => { autoTimer = null; if (auto && ready) next(); }, readDelay());
+  }
+
+  function setAuto(on) {
+    auto = on;
+    renderPlay();
+    if (!on) clearAuto();
+    else scheduleAuto();
+  }
+
+  function togglePlay() {
+    if (auto) { setAuto(false); return; }
+    if (ready && cur >= concepts.length - 1) {          // lesson already finished: start again from the top
+      auto = true; renderPlay();
+      play(0);
+      return;
+    }
+    setAuto(true);
+  }
+
   function buildList() {
     $('lList').innerHTML = concepts.map((c, i) =>
       `<li><button type="button" data-i="${i}"><span class="l-num">${pad2(i + 1)}</span>` +
@@ -575,6 +621,8 @@
     $('lExp').classList.add('l-dim');
     $('lGo').disabled = true;
     $('lPrev').disabled = true;
+    ready = false;
+    clearAuto();
     renderList();
 
     try {
@@ -595,16 +643,20 @@
 
     $('lExp').innerHTML = typeof c.exp === 'function' ? c.exp() : c.exp;
     $('lExp').classList.remove('l-dim');
-    $('lGo').innerHTML = i === concepts.length - 1 ? `Restart lesson ${ICON_RESTART}` : `Continue ${ICON_NEXT}`;
+    $('lGo').innerHTML = i === concepts.length - 1 ? `Restart lesson ${ICON_RESTART}` : `Next ${ICON_NEXT}`;
     $('lGo').disabled = false;
     $('lPrev').disabled = i === 0;
     done[i] = true;
+    ready = true;
     renderList();
+    scheduleAuto();
   }
 
   // Start (or jump) the lesson at concept k: rebuild the run from the ribbon, then play up to concept k.
   async function play(k) {
     const my = ++epoch;
+    ready = false;
+    clearAuto();
     cancelRun();
     setFast(false);
     internal = true; resetSimulation(); internal = false;
@@ -634,10 +686,13 @@
     });
     $('lGo').addEventListener('click', next);
     $('lPrev').addEventListener('click', prev);
+    $('lPlay').addEventListener('click', togglePlay);
+    renderPlay();
 
     // script.js calls this at the end of every resetSimulation: the ribbon (W, N, m, error, target) changed
     window.__learnReset = () => {
       if (internal) return;
+      setAuto(false);                                  // configuration changed: stop autoplay
       play(0);
     };
 

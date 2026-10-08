@@ -1,7 +1,7 @@
 /* ================================================================
    GO-BACK-N ARQ — GUIDED LESSON (learn.css)
    The extras the right-hand lesson panel needs on top of style.css:
-   live commentary, Back/Continue buttons and the concept list.
+   live commentary, Back / Play / Next buttons and the concept list.
    ================================================================ */
 
 /* live commentary while the stage animates */
@@ -45,7 +45,21 @@
 }
 
 .l-nav .ctrl-btn { flex: 1; }
-.l-nav .ctrl-btn.primary { flex: 2.5; }
+.l-nav .ctrl-btn.play-btn { flex: 1.3; justify-content: center; gap: 8px; }
+.l-nav .ctrl-btn.primary { flex: 1.6; }
+
+/* Play / Pause */
+.l-nav .ctrl-btn.play-btn {
+  background: var(--blue-soft);
+  border-color: transparent;
+  color: var(--blue);
+  font-weight: 600;
+}
+.l-nav .ctrl-btn.play-btn:hover { background: #dfeaff; }
+.l-nav .ctrl-btn.play-btn.is-playing {
+  background: var(--blue);
+  color: #fff;
+}
 
 /* concept list */
 .l-list-head {
