@@ -42,6 +42,7 @@
   --c-retx:      #f1bc66;
   --c-retx-bg:   #3d3015;
   --c-lost:      #f3829a;
+  --c-corrupt:   #b794f6;
 
   /* Typography */
   --font-sans:   'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -791,6 +792,19 @@ html, body {
   50%      { opacity: 0.6; }
 }
 
+/* corrupted packets: violet, with a small jitter to suggest flipped bits */
+.pkt.corrupt {
+  background: var(--c-corrupt);
+  color: #14091f;
+  animation: corrupt-jitter 0.22s steps(2, end) infinite;
+}
+
+@keyframes corrupt-jitter {
+  0%   { translate: -1.5px 0; }
+  50%  { translate: 1.5px 1px; }
+  100% { translate: -1px -1px; }
+}
+
 .pkt.bad {
   background: var(--c-lost) !important;
   color: #1a0b10 !important;
@@ -812,6 +826,11 @@ html, body {
   animation: marker-pop 0.3s var(--ease);
   z-index: 10;
   white-space: nowrap;
+}
+
+.chan-marker.corrupt-marker {
+  background: var(--c-corrupt);
+  color: #14091f;
 }
 
 .chan-marker.lost-marker {
@@ -876,6 +895,7 @@ html, body {
 .lg-ack  { background: var(--c-ack); }
 .lg-retx { background: var(--c-retx); }
 .lg-delay { background: transparent; border: 1.5px dashed var(--s-muted); }
+.lg-corrupt { background: var(--c-corrupt); }
 
 .lg-x {
   font-style: normal;

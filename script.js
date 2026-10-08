@@ -22,7 +22,7 @@ const sim = {
   maxSw:        7,          // 2^m - 1
   windowSize:   4,          // Sw
   totalFrames:  9,          // N (dynamic single source of truth!)
-  mode:         'normal',   // 'normal' | 'loss' | 'ackloss' | 'framedelay' | 'ackdelay'
+  mode:         'normal',   // 'normal' | 'loss' | 'ackloss' | 'framedelay' | 'ackdelay' | 'framecorrupt' | 'ackcorrupt'
   targetFrame:  1,          // Which frame or ACK is affected
   stepMs:       1200,       // Real ms per unit for playback speed
 
@@ -81,6 +81,10 @@ function buildTimeline(cfg) {
     dataFault.set(`${targetFrame}#1`, 'delay');
   } else if (mode === 'ackdelay') {
     ackFault.set(targetFrame, 'delay');
+  } else if (mode === 'framecorrupt') {
+    dataFault.set(`${targetFrame}#1`, 'corrupt');     // crosses the whole channel, then fails its checksum
+  } else if (mode === 'ackcorrupt') {
+    ackFault.set(targetFrame, 'corrupt');
   }
   const isDelay = mode === 'framedelay' || mode === 'ackdelay';
   const delayedWaiting = [];   // delayed packets (their queue entry is retimed when a timeout happens first)
@@ -104,7 +108,7 @@ function buildTimeline(cfg) {
   // Priority Queue
   const q = [];
   let order = 0;
-  const PRI = { ARRIVE: 0, LOST: 0, ACK_LOST: 1, ACK_ARRIVE: 1, TIMEOUT: 2, PUMP: 3 };
+  const PRI = { ARRIVE: 0, LOST: 0, CORRUPT: 0, ACK_LOST: 1, ACK_ARRIVE: 1, ACK_CORRUPT: 1, TIMEOUT: 2, PUMP: 3 };
   const schedule = (t, kind, data) => { const e = { t, kind, pri: PRI[kind], n: order++, data }; q.push(e); return e; };
   const popNext = () => {
     let bi = 0;
@@ -156,6 +160,7 @@ function buildTimeline(cfg) {
     if (fault) dataFault.delete(`${frameId}#${attempt}`);
     const lost    = fault === 'lost';
     const delayed = fault === 'delay';
+    const corrupt = fault === 'corrupt';
 
     snAbs++;
     states[frameId] = retx ? 'retx' : 'sent';
@@ -168,17 +173,17 @@ function buildTimeline(cfg) {
     }
 
     const pkt = {
-      kind: 'data', seq: frameId, wireSeq: seq, retx, lost, delayed, discarded: false,
+      kind: 'data', seq: frameId, wireSeq: seq, retx, lost, delayed, corrupt, discarded: false,
       t0: t, t1: lost ? t + D / 2 : delayed ? t + DELAY.FRAME_FALLBACK : t + D, frac: lost ? 0.5 : 1,
       startEv: events.length, endEv: Infinity, el: null, markerEl: null,
     };
     packets.push(pkt);
 
-    const arrivalKind = lost ? 'LOST' : 'ARRIVE';
+    const arrivalKind = lost ? 'LOST' : corrupt ? 'CORRUPT' : 'ARRIVE';
     const entry = schedule(pkt.t1, arrivalKind, { seq: frameId, wireSeq: seq, pkt, retx });
     if (delayed) { pkt.entry = entry; delayedWaiting.push(pkt); }
 
-    emit('SEND', t, { seq: frameId, wireSeq: seq, retx, attempt, timerStarted, delayed });
+    emit('SEND', t, { seq: frameId, wireSeq: seq, retx, attempt, timerStarted, delayed, corrupt });
     txFree = t + TX;
   }
 
@@ -205,6 +210,15 @@ function buildTimeline(cfg) {
         states[seq] = 'lost';
         pkt.endEv = events.length;
         emit('LOST', t, { seq, wireSeq: seqOf(seq, SEQ_SPACE) });
+        break;
+      }
+
+      case 'CORRUPT': {
+        // The frame reaches the receiver, but its checksum fails: it is discarded silently (no ACK, Rn unchanged).
+        const { seq, pkt } = ev.data;
+        states[seq] = 'discarded';
+        pkt.endEv = events.length;
+        emit('CORRUPT', t, { seq, wireSeq: seqOf(seq, SEQ_SPACE) });
         break;
       }
 
@@ -237,23 +251,24 @@ function buildTimeline(cfg) {
         if (ackFaultKind) ackFault.delete(frameId);
         const ackLost    = ackFaultKind === 'lost';
         const ackDelayed = ackFaultKind === 'delay';
-        if (ackLost || ackDelayed) lostAckNums.add(RnAfterAbs);   // numbers the sender will not hear in time
+        const ackCorrupt = ackFaultKind === 'corrupt';
+        if (ackLost || ackDelayed || ackCorrupt) lostAckNums.add(RnAfterAbs);   // numbers the sender will not hear in time
 
         const ack = {
           kind: 'ack', ackNum: RnAfterMod, confirmedSeq: frameId, dup: !accepted,
-          lost: ackLost, delayed: ackDelayed,
+          lost: ackLost, delayed: ackDelayed, corrupt: ackCorrupt,
           t0: t, t1: ackLost ? t + A / 2 : ackDelayed ? t + DELAY.ACK_FALLBACK : t + A, frac: ackLost ? 0.5 : 1,
           startEv: events.length, endEv: Infinity, el: null, markerEl: null,
         };
         packets.push(ack);
 
-        const ackKind = ackLost ? 'ACK_LOST' : 'ACK_ARRIVE';
+        const ackKind = ackLost ? 'ACK_LOST' : ackCorrupt ? 'ACK_CORRUPT' : 'ACK_ARRIVE';
         const ackEntry = schedule(ack.t1, ackKind, { ackNum: RnAfterMod, confirmedSeq: frameId, pkt: ack });
         if (ackDelayed) { ack.entry = ackEntry; delayedWaiting.push(ack); }
 
         emit('ARRIVE', t, {
           seq: frameId, wireSeq, accepted, reason, retx,
-          late: !!pkt.delayed, ackDelayed,
+          late: !!pkt.delayed, ackDelayed, ackCorrupt,
           RnBefore: RnBeforeAbs, RnAfter: RnAfterAbs, ackNum: RnAfterMod,
         });
         break;
@@ -263,6 +278,14 @@ function buildTimeline(cfg) {
         const { ackNum, confirmedSeq, pkt } = ev.data;
         pkt.endEv = events.length;
         emit('ACK_LOST', t, { ackNum, confirmedSeq });
+        break;
+      }
+
+      case 'ACK_CORRUPT': {
+        // The ACK reaches the sender, but its checksum fails: it is ignored (Sf and the timer are untouched).
+        const { ackNum, confirmedSeq, pkt } = ev.data;
+        pkt.endEv = events.length;
+        emit('ACK_CORRUPT', t, { ackNum, confirmedSeq });
         break;
       }
 
@@ -426,13 +449,17 @@ function readConfigFromUI() {
   D.targetCell.classList.toggle('is-disabled', noFault);
   D.faultTargetSelect.disabled = noFault;
   const MODE_INFO = {
-    normal:     { hint: 'Loss or delay · frames or ACKs',  target: 'Available when a fault is selected' },
+    normal:     { hint: 'Loss, delay or corruption',  target: 'Available when a fault is selected' },
     loss:       { hint: 'A frame is destroyed in the channel',    target: 'The packet that will be lost' },
     ackloss:    { hint: 'An ACK is destroyed in the channel',     target: 'The ACK that will be lost' },
     framedelay: { hint: "Frame is still travelling. It may arrive after the sender's timeout, causing unnecessary retransmission.",
                   target: 'The frame that will be delayed' },
     ackdelay:   { hint: 'ACK is still travelling toward the sender. The sender may timeout before receiving it.',
                   target: 'The frame whose ACK will be delayed' },
+    framecorrupt: { hint: "Frame arrives with flipped bits. The receiver's checksum fails, so it is discarded and never acknowledged.",
+                  target: 'The frame that will be corrupted' },
+    ackcorrupt: { hint: "ACK arrives with flipped bits. The sender's checksum fails, so the ACK is ignored.",
+                  target: 'The frame whose ACK will be corrupted' },
   };
   const info = MODE_INFO[sim.mode] || MODE_INFO.normal;
   D.modeHint.textContent = info.hint;
@@ -733,6 +760,8 @@ function updateDisplay() {
   if (ev) {
     if (ev.type === 'COMPLETE')                          { label = 'COMPLETE';  cls = 'is-done'; }
     else if (ev.type === 'SEND' && ev.delayed)           { label = 'FRAME DELAYED'; cls = 'is-warn'; }
+    else if (ev.type === 'CORRUPT')                      { label = 'FRAME CORRUPTED'; cls = 'is-warn'; }
+    else if (ev.type === 'ACK_CORRUPT')                  { label = 'ACK CORRUPTED';   cls = 'is-warn'; }
     else if (ev.type === 'ARRIVE' && ev.ackDelayed)      { label = 'ACK DELAYED';   cls = 'is-warn'; }
     else if (ev.type === 'TIMEOUT')                      { label = 'TIMEOUT';   cls = 'is-warn'; }
     else if (ev.type === 'LOST' || ev.type === 'ACK_LOST') { label = ev.type === 'LOST' ? 'PACKET LOST' : 'ACK LOST'; cls = 'is-warn'; }
@@ -760,6 +789,19 @@ function makePacketEl(p) {
   }
   D.packetLayer.appendChild(el);
   return el;
+}
+
+/* A corrupted packet is drawn normally until it is half-way, where "bits flip" and it turns violet. */
+function applyCorruptLook(p, prog) {
+  const bad = prog >= 0.5;
+  if (p._bad === bad) return;
+  p._bad = bad;
+  p.el.classList.toggle('corrupt', bad);
+  const sub = p.el.querySelector('.pkt-sub');
+  if (sub) {
+    if (p._sub === undefined) p._sub = sub.textContent;
+    sub.textContent = bad ? 'CORRUPT' : p._sub;
+  }
 }
 
 function renderPackets() {
@@ -801,9 +843,31 @@ function renderPackets() {
       p.el.style.left = x + 'px';
       p.el.style.top  = y + 'px';
       p.el.classList.toggle('bad', fading);
+      if (p.corrupt) applyCorruptLook(p, prog);
     } else if (p.el) {
       p.el.remove();
       p.el = null;
+      p._bad = undefined;
+    }
+
+    // Checksum-failure marker where a corrupted packet is rejected (receiver end for frames, sender end for ACKs)
+    if (p.corrupt) {
+      const markerAlive = started && ended && vt < p.t1 + 3.0;
+      if (markerAlive) {
+        if (!p.markerEl) {
+          const m = document.createElement('div');
+          m.className = 'chan-marker corrupt-marker';
+          m.innerHTML = p.kind === 'ack' ? '⚡ ACK CORRUPT' : '⚡ CHECKSUM ERROR';
+          D.packetLayer.appendChild(m);
+          p.markerEl = m;
+        }
+        const x = p.kind === 'data' ? col(p.seq) : col(p.confirmedSeq) + 14;
+        p.markerEl.style.left = x + 'px';
+        p.markerEl.style.top  = (p.kind === 'data' ? endY - 8 : startY + 8) + 'px';
+      } else if (p.markerEl) {
+        p.markerEl.remove();
+        p.markerEl = null;
+      }
     }
 
     // Mid-Channel Lost Marker
